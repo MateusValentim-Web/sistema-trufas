@@ -816,32 +816,30 @@
   }
 
   async function deleteSale(saleId) {
-    const { count, error: paymentsCheckError } = await supabase
+    const saleIdNumber = Number(saleId);
+
+    const { error: paymentsError } = await supabase
       .from("pagamentos_venda")
-      .select("id", { count: "exact", head: true })
-      .eq("venda_id", Number(saleId));
-    if (paymentsCheckError) throw paymentsCheckError;
-    if (count > 0)
-      throw new Error(
-        "Esta venda possui pagamentos registrados e não pode ser excluída para preservar o histórico.",
-      );
+      .delete()
+      .eq("venda_id", saleIdNumber);
+    if (paymentsError) throw paymentsError;
 
     const { error: itemsError } = await supabase
       .from("itens_venda")
       .delete()
-      .eq("venda_id", Number(saleId));
+      .eq("venda_id", saleIdNumber);
+    if (itemsError) throw itemsError;
 
-    if (itemsError) {
-      throw itemsError;
-    }
-
-    const { error } = await supabase
+    const { data: deletedSale, error } = await supabase
       .from("vendas")
       .delete()
-      .eq("id", Number(saleId));
+      .eq("id", saleIdNumber)
+      .select("id")
+      .maybeSingle();
 
-    if (error) {
-      throw error;
+    if (error) throw error;
+    if (!deletedSale) {
+      throw new Error("O banco não confirmou a exclusão desta venda.");
     }
   }
 
@@ -1361,6 +1359,10 @@
 
     $("#stat-revenue").textContent = money(
       todaySales.reduce((total, sale) => total + sale.total, 0),
+    );
+
+    $("#stat-total-revenue").textContent = money(
+      data.sales.reduce((total, sale) => total + Number(sale.total || 0), 0),
     );
 
     $("#stat-clients").textContent = data.clients.length;
@@ -3598,7 +3600,7 @@
 
     if (
       !window.confirm(
-        `Excluir a venda de ${sale.clientName}? O painel e o histórico serão atualizados.`,
+        `Excluir a venda de ${sale.clientName}? O pedido e os pagamentos registrados serão apagados. Esta ação não pode ser desfeita.`,
       )
     ) {
       return;
@@ -3608,10 +3610,15 @@
       await deleteSale(sale.id);
 
       data.sales = data.sales.filter((item) => item.id !== sale.id);
+      data.payments = data.payments.filter(
+        (payment) => String(payment.saleId) !== String(sale.id),
+      );
 
       renderHome();
 
       renderHistory();
+
+      renderPendingPayments();
 
       renderSellerProfiles();
 
