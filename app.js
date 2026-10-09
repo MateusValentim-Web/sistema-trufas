@@ -44,16 +44,9 @@
 
     sales: [],
 
-    sellers: [
-      {
-        id: "seller1",
-        name: "Vendedora 1",
-      },
-      {
-        id: "seller2",
-        name: "Vendedora 2",
-      },
-    ],
+    payments: [],
+
+    sellers: [],
 
     sellerReports: [],
 
@@ -73,6 +66,7 @@
   let currentUser = null;
 
   let pendingSellerAttribution = null;
+  let quickClientMode = false;
 
   // ============================================================
   // SELETORES
@@ -364,6 +358,7 @@
         sellersResult,
         salesResult,
         saleItemsResult,
+        paymentsResult,
         reportsResult,
         configResult,
       ] = await Promise.all([
@@ -378,6 +373,11 @@
         }),
 
         supabase.from("itens_venda").select("*").order("id"),
+
+        supabase
+          .from("pagamentos_venda")
+          .select("*")
+          .order("created_at", { ascending: true }),
 
         supabase.from("acertos_vendedoras").select("*").order("created_at", {
           ascending: false,
@@ -406,6 +406,10 @@
         throw saleItemsResult.error;
       }
 
+      if (paymentsResult.error) {
+        throw paymentsResult.error;
+      }
+
       if (reportsResult.error) {
         throw reportsResult.error;
       }
@@ -419,6 +423,7 @@
       const sellers = sellersResult.data || [];
       const sales = salesResult.data || [];
       const saleItems = saleItemsResult.data || [];
+      const payments = paymentsResult.data || [];
       const reports = reportsResult.data || [];
 
       data.clients = clients.map((client) => ({
@@ -480,11 +485,29 @@
 
           total: Number(sale.total || 0),
 
+          orderStatus: sale.status_pedido || "pendente",
+
+          payments: payments
+            .filter((payment) => String(payment.venda_id) === String(sale.id))
+            .map((payment) => ({
+              id: String(payment.id),
+              amount: Number(payment.valor),
+              method: payment.forma_pagamento,
+              date: payment.created_at,
+              notes: payment.observacoes || "",
+            })),
+
           notes: sale.observacoes || "",
 
           date: sale.created_at,
         };
       });
+
+      data.payments = payments.map((payment) => ({
+        ...payment,
+        amount: Number(payment.valor),
+        saleId: String(payment.venda_id),
+      }));
 
       data.sellerReports = reports.map((report) => ({
         id: String(report.id),
@@ -548,30 +571,6 @@
           id: String(inserted.id),
           name: inserted.nome,
           description: inserted.descricao || "",
-        });
-      }
-    }
-
-    if (!data.sellers.length) {
-      for (const seller of defaults.sellers) {
-        const { data: inserted, error } = await supabase
-          .from("vendedoras")
-          .insert({
-            nome: seller.name,
-            ativo: true,
-          })
-          .select()
-          .single();
-
-        if (error) {
-          console.error(error);
-          continue;
-        }
-
-        data.sellers.push({
-          id: String(inserted.id),
-          name: inserted.nome,
-          active: true,
         });
       }
     }
@@ -734,6 +733,8 @@
         total: sale.total,
 
         observacoes: sale.notes || null,
+
+        status_pedido: sale.orderStatus || "pendente",
       })
       .select()
       .single();
@@ -775,12 +776,56 @@
     }
 
     sale.id = String(insertedSale.id);
+    sale.payments = [];
+    try {
+      const initialPayments = sale.initialPayments || [];
+      if (initialPayments.length) {
+        const { data: savedPayments, error: paymentsError } = await supabase
+          .from("pagamentos_venda")
+          .insert(
+            initialPayments.map((payment) => ({
+              venda_id: insertedSale.id,
+              valor: (Math.round(Number(payment.amount) * 100) / 100).toFixed(
+                2,
+              ),
+              forma_pagamento: payment.method,
+            })),
+          )
+          .select();
+        if (paymentsError) throw paymentsError;
+        sale.payments = (savedPayments || []).map((payment) => ({
+          id: String(payment.id),
+          amount: Number(payment.valor),
+          method: payment.forma_pagamento,
+          date: payment.created_at,
+        }));
+      }
+    } catch (paymentError) {
+      await supabase
+        .from("itens_venda")
+        .delete()
+        .eq("venda_id", insertedSale.id);
+      await supabase.from("vendas").delete().eq("id", insertedSale.id);
+      throw paymentError;
+    }
+
+    sale.id = String(insertedSale.id);
     sale.date = insertedSale.created_at;
 
     return sale;
   }
 
   async function deleteSale(saleId) {
+    const { count, error: paymentsCheckError } = await supabase
+      .from("pagamentos_venda")
+      .select("id", { count: "exact", head: true })
+      .eq("venda_id", Number(saleId));
+    if (paymentsCheckError) throw paymentsCheckError;
+    if (count > 0)
+      throw new Error(
+        "Esta venda possui pagamentos registrados e não pode ser excluída para preservar o histórico.",
+      );
+
     const { error: itemsError } = await supabase
       .from("itens_venda")
       .delete()
@@ -864,13 +909,60 @@
   }
 
   async function deleteSeller(sellerId) {
-    const { error } = await supabase
+    const { data: sales, error: salesError } = await supabase
+      .from("vendas")
+      .select("id")
+      .eq("vendedora_id", Number(sellerId));
+
+    if (salesError) throw salesError;
+
+    const saleIds = (sales || []).map((sale) => sale.id);
+
+    if (saleIds.length) {
+      const { error: paymentsError } = await supabase
+        .from("pagamentos_venda")
+        .delete()
+        .in("venda_id", saleIds);
+      if (paymentsError) throw paymentsError;
+
+      const { error: itemsError } = await supabase
+        .from("itens_venda")
+        .delete()
+        .in("venda_id", saleIds);
+      if (itemsError) throw itemsError;
+
+      const { error: salesDeleteError } = await supabase
+        .from("vendas")
+        .delete()
+        .in("id", saleIds);
+      if (salesDeleteError) throw salesDeleteError;
+    }
+
+    const { error: reportsError } = await supabase
+      .from("acertos_vendedoras")
+      .delete()
+      .eq("vendedora_id", Number(sellerId));
+    if (reportsError) throw reportsError;
+
+    // Mantém os clientes e remove apenas a atribuição à vendedora excluída.
+    const { error: clientsError } = await supabase
+      .from("clientes")
+      .update({ vendedora_id: null })
+      .eq("vendedora_id", Number(sellerId));
+    if (clientsError) throw clientsError;
+
+    const { data: deletedSeller, error } = await supabase
       .from("vendedoras")
       .delete()
-      .eq("id", Number(sellerId));
+      .eq("id", Number(sellerId))
+      .select("id")
+      .maybeSingle();
 
-    if (error) {
-      throw error;
+    if (error) throw error;
+    if (!deletedSeller) {
+      throw new Error(
+        "O banco não confirmou a exclusão. Verifique as permissões de exclusão da tabela vendedoras.",
+      );
     }
   }
 
@@ -1031,6 +1123,16 @@
   // ============================================================
 
   function setView(name) {
+    if (!$(`#view-${name}`)) {
+      name = "inicio";
+    }
+
+    try {
+      localStorage.setItem("trufas:last-view", name);
+    } catch (error) {
+      console.warn("Não foi possível salvar a seção atual.", error);
+    }
+
     $$(".view").forEach((view) => {
       view.classList.toggle("active", view.id === `view-${name}`);
     });
@@ -1042,6 +1144,7 @@
     const labels = {
       inicio: "Visão geral",
       vendas: "Cadastrar venda",
+      pendencias: "Pendências de pagamento",
       clientes: "Clientes",
       sabores: "Sabores",
       vendedoras: "Vendedoras",
@@ -1073,6 +1176,7 @@
     if (name === "historico") {
       renderHistory();
     }
+    if (name === "pendencias") renderPendingPayments();
   }
 
   // ============================================================
@@ -1084,6 +1188,165 @@
       .map((item) => `${item.qty}× ${item.flavorName}`)
       .join(", ");
   }
+
+  const paymentTotals = (sale) => {
+    const cash = (sale.payments || [])
+      .filter((p) => p.method === "dinheiro")
+      .reduce((n, p) => n + Math.round(Number(p.amount) * 100), 0);
+    const pix = (sale.payments || [])
+      .filter((p) => p.method === "pix")
+      .reduce((n, p) => n + Math.round(Number(p.amount) * 100), 0);
+    const total = Math.round(Number(sale.total || 0) * 100);
+    const received = cash + pix;
+    return {
+      cash,
+      pix,
+      received,
+      balance: Math.max(0, total - received),
+      status:
+        received === 0
+          ? "Não pago"
+          : received >= total
+            ? "Pago"
+            : "Parcialmente pago",
+    };
+  };
+
+  async function insertPayment(sale, amount, method) {
+    const cents = Math.round(Number(amount) * 100);
+    const balance = paymentTotals(sale).balance;
+    if (!Number.isSafeInteger(cents) || cents <= 0 || cents > balance)
+      throw new Error("Valor inválido ou maior que o saldo da venda.");
+    const { data: inserted, error } = await supabase
+      .from("pagamentos_venda")
+      .insert({
+        venda_id: Number(sale.id),
+        valor: (cents / 100).toFixed(2),
+        forma_pagamento: method,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    const payment = {
+      id: String(inserted.id),
+      amount: Number(inserted.valor),
+      method: inserted.forma_pagamento,
+      date: inserted.created_at,
+    };
+    sale.payments ||= [];
+    sale.payments.push(payment);
+    data.payments.push({
+      ...inserted,
+      amount: payment.amount,
+      saleId: sale.id,
+    });
+  }
+
+  async function updateSaleStatus(sale, status) {
+    const { error } = await supabase
+      .from("vendas")
+      .update({ status_pedido: status })
+      .eq("id", Number(sale.id));
+    if (error) throw error;
+    sale.orderStatus = status;
+  }
+
+  function renderPendingPayments() {
+    const host = $("#pending-list");
+    if (!host) return;
+    const query = ($("#pending-search")?.value || "")
+      .trim()
+      .toLocaleLowerCase("pt-BR");
+    const pending = data.sales
+      .filter((s) => paymentTotals(s).balance > 0)
+      .filter((s) => {
+        const client = data.clients.find((c) => c.id === s.clientId);
+        return `${s.clientName} ${client?.phone || ""}`
+          .toLocaleLowerCase("pt-BR")
+          .includes(query);
+      });
+    host.innerHTML = pending.length
+      ? pending
+          .map((s) => {
+            const t = paymentTotals(s),
+              client = data.clients.find((c) => c.id === s.clientId);
+            return `<div class="table-row"><div class="table-row-main"><strong>${esc(s.clientName)} · Venda #${esc(s.id)}</strong><small>${esc(client?.phone || "Sem telefone")} · ${dateLabel(s.date)} · ${esc(s.sellerName || "Sem vendedora")}</small><small>Total ${money(s.total)} · Dinheiro ${money(t.cash / 100)} · Pix ${money(t.pix / 100)} · Recebido ${money(t.received / 100)} · Falta ${money(t.balance / 100)} · ${t.status}</small></div><button type="button" class="button button-primary button-small" data-register-payment="${esc(s.id)}">Registrar pagamento</button></div>`;
+          })
+          .join("")
+      : '<div class="empty-state">Nenhuma venda com saldo em aberto.</div>';
+  }
+
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-register-payment]");
+    if (!button) return;
+
+    const sale = data.sales.find(
+      (s) => String(s.id) === String(button.dataset.registerPayment),
+    );
+
+    if (!sale) return;
+
+    const dialog = $("#payment-dialog");
+
+    $("#payment-sale-id").value = String(sale.id);
+    $("#payment-balance").textContent = money(
+      paymentTotals(sale).balance / 100,
+    );
+    $("#payment-amount").value = "";
+    $("#payment-method").value = "pix";
+
+    dialog.showModal();
+    $("#payment-amount").focus();
+  });
+
+  $("#payment-close").addEventListener("click", () => {
+    $("#payment-dialog").close();
+  });
+
+  $("#payment-cancel").addEventListener("click", () => {
+    $("#payment-dialog").close();
+  });
+
+  $("#payment-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const form = event.currentTarget;
+
+    if (!form.reportValidity()) return;
+
+    const sale = data.sales.find(
+      (s) => String(s.id) === $("#payment-sale-id").value,
+    );
+
+    if (!sale) {
+      toast("Não foi possível encontrar esta venda.");
+      $("#payment-dialog").close();
+      return;
+    }
+
+    const amount = Number($("#payment-amount").value);
+    const method = $("#payment-method").value;
+    const submitButton = $("#payment-submit");
+
+    submitButton.disabled = true;
+
+    try {
+      await insertPayment(sale, amount, method);
+
+      renderPendingPayments();
+      renderHistory();
+      renderHome();
+
+      $("#payment-dialog").close();
+
+      toast("Pagamento registrado com sucesso!");
+    } catch (error) {
+      console.error(error);
+      toast(error.message || "Não foi possível registrar o pagamento.");
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
 
   // ============================================================
   // HOME
@@ -1222,30 +1485,35 @@
   }
 
   function fillClientSelect() {
-    const select = $("#sale-client");
+    const select = document.querySelector("#sale-client");
+    const search = document.querySelector("#sale-client-search");
 
-    if (!select) {
-      return;
-    }
+    if (!select) return;
 
-    const current = select.value;
+    const current = String(select.value || "");
+    const query = (search?.value || "").trim().toLocaleLowerCase("pt-BR");
+
+    const clients = (data.clients || []).filter((client) => {
+      const name = String(client.name || "");
+      const phone = String(client.phone || "");
+      const text = `${name} ${phone}`.toLocaleLowerCase("pt-BR");
+
+      return text.includes(query);
+    });
 
     select.innerHTML =
       '<option value="">Selecione um cliente</option>' +
-      data.clients
+      clients
         .map(
           (client) =>
-            `<option value="${esc(client.id)}">
-                            ${esc(client.name)}
-                        </option>`,
+            `<option value="${esc(String(client.id))}">${esc(client.name || "Sem nome")}</option>`,
         )
         .join("");
 
-    if (data.clients.some((client) => client.id === current)) {
+    if (clients.some((client) => String(client.id) === current)) {
       select.value = current;
     }
   }
-
   function fillSellerSelect(selectId, value = "") {
     const select = $(`#${selectId}`);
 
@@ -1320,7 +1588,7 @@
       .toLowerCase();
 
     if (normalized.includes("maracuja")) {
-      return "🟣";
+      return "🟡";
     }
 
     if (
@@ -1391,14 +1659,14 @@
                         cx="20"
                         cy="23"
                         r="15"
-                        fill="#633c65"
+                        fill="#e5a926"
                     />
 
                     <circle
                         cx="20"
                         cy="23"
                         r="12"
-                        fill="#f2c45e"
+                        fill="#f7d56c"
                     />
 
                     <path
@@ -1613,11 +1881,7 @@
     } else if (qty === 2) {
       breakdown = data.promos.two ? "Combo de 2: R$ 9,00" : "2 × R$ 5,00";
     } else if (qty >= 3) {
-      breakdown = data.promos.three
-        ? `${qty} × R$ 4,00`
-        : data.promos.two
-          ? `Combo de 2: R$ 9,00 + ${qty - 2} × R$ 5,00`
-          : `${qty} × R$ 5,00`;
+      breakdown = data.promos.three ? `${qty} × R$ 4,00` : `${qty} × R$ 5,00`;
     }
 
     $("#price-explanation").textContent = breakdown;
@@ -1637,7 +1901,9 @@
     const sales = [...data.sales]
       .sort((a, b) => b.date.localeCompare(a.date))
       .filter((sale) => {
-        const text = `${sale.clientName} ${saleDetails(sale)} ${
+        const clientPhone =
+          data.clients.find((c) => c.id === sale.clientId)?.phone || "";
+        const text = `${sale.clientName} ${clientPhone} ${saleDetails(sale)} ${
           sale.sellerName || ""
         }`.toLowerCase();
 
@@ -1691,6 +1957,10 @@
                                 <span class="row-price">
                                     ${money(sale.total)}
                                 </span>
+
+                                <small class="sale-financial">Recebido ${money(paymentTotals(sale).received / 100)} · Falta ${money(paymentTotals(sale).balance / 100)} · ${paymentTotals(sale).status}</small>
+                                <label class="order-status-label">Pedido <select data-order-status="${esc(sale.id)}"><option value="pendente" ${sale.orderStatus === "pendente" ? "selected" : ""}>Pendente</option><option value="em_andamento" ${sale.orderStatus === "em_andamento" ? "selected" : ""}>Em andamento</option><option value="concluido" ${sale.orderStatus === "concluido" ? "selected" : ""}>Concluído</option></select></label>
+                                <details class="payment-history"><summary>Pagamentos (${(sale.payments || []).length})</summary><small>${(sale.payments || []).map((p) => `${money(p.amount)} ${p.method === "pix" ? "Pix" : "Dinheiro"} · ${dateLabel(p.date)}`).join("<br>") || "Nenhum pagamento"}</small></details>
 
                                 <button
                                     type="button"
@@ -1765,7 +2035,8 @@
                                     type="number"
                                     min="0"
                                     step="1"
-                                    value="0"
+                                    placeholder="0"
+                                    value=""
                                     class="seller-taken"
                                     aria-label="${esc(flavor.name)} levadas"
                                 >
@@ -1774,7 +2045,8 @@
                                     type="number"
                                     min="0"
                                     step="1"
-                                    value="0"
+                                    placeholder="0"
+                                    value=""
                                     class="seller-returned"
                                     aria-label="${esc(
                                       flavor.name,
@@ -1924,53 +2196,55 @@
             const sold = taken - returned;
 
             return `
-                            <div class="table-row">
+              <article class="seller-report-row">
+                <span class="seller-report-icon" aria-hidden="true">&#9827;</span>
 
-                                <span class="recent-avatar">
-                                    ♧
-                                </span>
+                <div class="seller-report-main">
+                  <div class="seller-report-heading">
+                    <strong>${esc(seller?.name || "Vendedora removida")}</strong>
+                    <time>${dateLabel(report.date + "T12:00:00")}</time>
+                  </div>
 
-                                <div class="table-row-main">
+                  <div class="seller-report-totals">
+                    <div class="seller-report-total">
+                      <span>Total vendido</span>
+                      <strong>${sold} ${sold === 1 ? "trufa" : "trufas"}</strong>
+                    </div>
+                    <div class="seller-report-total is-returned">
+                      <span>Total que voltou</span>
+                      <strong>${returned} ${returned === 1 ? "trufa" : "trufas"}</strong>
+                    </div>
+                  </div>
 
-                                    <strong>
-                                        ${esc(
-                                          seller?.name || "Vendedora removida",
-                                        )}
-                                        ·
-                                        ${dateLabel(report.date + "T12:00:00")}
-                                    </strong>
+                  <div class="seller-report-breakdown">
+                    <div class="seller-report-breakdown-head">
+                      <span>Sabor</span>
+                      <span>Vendidas</span>
+                      <span>Voltaram</span>
+                    </div>
+                    ${report.items
+                      .map(
+                        (item) => `
+                          <div class="seller-report-flavor">
+                            <strong>${esc(item.flavorName)}</strong>
+                            <span>${item.qty - item.returned}</span>
+                            <span class="returned-count">${item.returned}</span>
+                          </div>
+                        `,
+                      )
+                      .join("")}
+                  </div>
+                </div>
 
-                                    <small>
-                                        ${report.items
-                                          .map(
-                                            (item) =>
-                                              `${esc(item.flavorName)}: ${
-                                                item.qty - item.returned
-                                              } vendidas, ${
-                                                item.returned
-                                              } voltaram`,
-                                          )
-                                          .join(" · ")}
-                                    </small>
-
-                                </div>
-
-                                <span class="row-meta">
-                                    ${sold} vendidas
-                                </span>
-
-                                <button
-                                    type="button"
-                                    class="mini-button seller-delete-button"
-                                    data-delete-seller-report="${esc(
-                                      report.id,
-                                    )}"
-                                >
-                                    Excluir
-                                </button>
-
-                            </div>
-                        `;
+                <button
+                  type="button"
+                  class="mini-button seller-delete-button"
+                  data-delete-seller-report="${esc(report.id)}"
+                >
+                  Excluir
+                </button>
+              </article>
+            `;
           })
           .join("")
       : `
@@ -2055,6 +2329,12 @@
   }
 
   function updateSellerNet() {
+    const returned = $$(".seller-item").reduce(
+      (total, row) =>
+        total + (Number($(".seller-returned", row).value) || 0),
+      0,
+    );
+
     const sold = $$(".seller-item").reduce(
       (total, row) =>
         total +
@@ -2068,6 +2348,9 @@
 
     $("#seller-net-total").textContent = `${sold} ${
       sold === 1 ? "trufa" : "trufas"
+    }`;
+    $("#seller-returned-total").textContent = `${returned} ${
+      returned === 1 ? "trufa" : "trufas"
     }`;
   }
 
@@ -2379,10 +2662,6 @@
       setView(go.dataset.go);
     }
 
-    if (event.target.closest("#new-client-button")) {
-      $("#client-dialog").showModal();
-    }
-
     if (event.target.closest("#new-flavor-button")) {
       const form = $("#flavor-form");
 
@@ -2500,6 +2779,8 @@
     if (event.target.id === "client-search") {
       renderClients();
     }
+    if (event.target.id === "sale-client-search") fillClientSelect();
+    if (event.target.id === "pending-search") renderPendingPayments();
 
     if (
       event.target.id === "history-search" ||
@@ -2521,6 +2802,21 @@
   document.addEventListener("change", async (event) => {
     if (event.target.matches(".flavor-select")) {
       updateTotal();
+    }
+
+    if (event.target.matches("[data-order-status]")) {
+      const sale = data.sales.find(
+        (s) => s.id === event.target.dataset.orderStatus,
+      );
+      if (sale)
+        try {
+          await updateSaleStatus(sale, event.target.value);
+          toast("Status do pedido atualizado.");
+        } catch (error) {
+          console.error(error);
+          event.target.value = sale.orderStatus || "pendente";
+          toast("Não foi possível atualizar o status.");
+        }
     }
 
     if (event.target.matches("#promo-two,#promo-three")) {
@@ -2548,18 +2844,39 @@
   // NOVO CLIENTE
   // ============================================================
 
-  $("#new-client-button").addEventListener("click", () => {
+  function prepareNewClientForm(fromSale = false) {
     const form = $("#client-form");
 
     ensureSellerFields();
-
     form.reset();
 
     form.elements.namedItem("id").value = "";
 
-    fillSellerSelect("client-seller");
+    fillSellerSelect(
+      "client-seller",
+      fromSale ? $("#sale-seller").value : undefined,
+    );
 
-    $("#client-dialog-title").textContent = "Cadastrar cliente";
+    $("#client-dialog-title").textContent = fromSale
+      ? "Cadastrar cliente para esta venda"
+      : "Cadastrar cliente";
+
+    quickClientMode = fromSale;
+  }
+
+  $("#new-client-button").addEventListener("click", () => {
+    prepareNewClientForm(false);
+    $("#client-dialog").showModal();
+  });
+
+  $("#add-client-from-sale").addEventListener("click", () => {
+    prepareNewClientForm(true);
+    $("#client-dialog").showModal();
+  });
+
+  $("#quick-client-button").addEventListener("click", () => {
+    prepareNewClientForm(true);
+    $("#client-dialog").showModal();
   });
 
   // ============================================================
@@ -2603,6 +2920,13 @@
 
         data.clients.push(client);
       }
+
+      if (!id && quickClientMode) {
+        $("#sale-client-search").value = "";
+        fillClientSelect();
+        $("#sale-client").value = client.id;
+      }
+      quickClientMode = false;
 
       form.closest("dialog").close();
 
@@ -2744,23 +3068,56 @@
 
       total: priceFor(quantity),
 
+      orderStatus: $("#sale-order-status").value,
+
+      initialPayments: [
+        {
+          method: "dinheiro",
+          amount: Number($("#sale-cash-payment").value || 0),
+        },
+        { method: "pix", amount: Number($("#sale-pix-payment").value || 0) },
+      ].filter((payment) => payment.amount > 0),
+
       notes: $("#sale-notes").value.trim(),
 
       date: new Date().toISOString(),
     };
 
+    const initialCents = sale.initialPayments.reduce(
+      (sum, payment) => sum + Math.round(payment.amount * 100),
+      0,
+    );
+    if (
+      sale.initialPayments.some(
+        (payment) => !Number.isFinite(payment.amount) || payment.amount < 0,
+      ) ||
+      initialCents > Math.round(sale.total * 100)
+    ) {
+      toast("Os pagamentos iniciais não podem superar o total da venda.");
+      return;
+    }
+
+    const submitButton = form.querySelector('[type="submit"]');
+    submitButton.disabled = true;
     try {
       await insertSale(sale);
 
       data.sales.push(sale);
 
       form.reset();
+      $("#sale-client-search").value = "";
+      $("#sale-order-status").value = "pendente";
+      $("#sale-cash-payment").value = "";
+      $("#sale-pix-payment").value = "";
 
       $("#sale-items").innerHTML = "";
 
       addSaleItem();
 
       renderHome();
+
+      renderHistory();
+      renderPendingPayments();
 
       renderSellerProfiles();
 
@@ -2771,6 +3128,8 @@
       console.error(error);
 
       toast("Não foi possível cadastrar a venda.");
+    } finally {
+      submitButton.disabled = false;
     }
   });
 
@@ -2793,17 +3152,17 @@
   // ============================================================
 
   // ============================================================
-// CADASTRAR / DESATIVAR / REATIVAR VENDEDORA
-// ============================================================
+  // CADASTRAR / DESATIVAR / REATIVAR VENDEDORA
+  // ============================================================
 
-function askSellerName() {
-  return new Promise((resolve) => {
-    if (!$("#seller-dialog-style")) {
-      const style = document.createElement("style");
+  function askSellerName() {
+    return new Promise((resolve) => {
+      if (!$("#seller-dialog-style")) {
+        const style = document.createElement("style");
 
-      style.id = "seller-dialog-style";
+        style.id = "seller-dialog-style";
 
-      style.textContent = `
+        style.textContent = `
         #seller-name-dialog {
           width: min(380px, calc(100% - 32px));
           border: 0;
@@ -2871,14 +3230,14 @@ function askSellerName() {
         }
       `;
 
-      document.head.appendChild(style);
-    }
+        document.head.appendChild(style);
+      }
 
-    const dialog = document.createElement("dialog");
+      const dialog = document.createElement("dialog");
 
-    dialog.id = "seller-name-dialog";
+      dialog.id = "seller-name-dialog";
 
-    dialog.innerHTML = `
+      dialog.innerHTML = `
       <form>
         <h2>Nova vendedora</h2>
 
@@ -2905,189 +3264,196 @@ function askSellerName() {
       </form>
     `;
 
-    document.body.appendChild(dialog);
+      document.body.appendChild(dialog);
 
-    const form = $("form", dialog);
+      const form = $("form", dialog);
 
-    let result = null;
+      let result = null;
 
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
 
-      const name = form.elements.namedItem("name").value.trim();
+        const name = form.elements.namedItem("name").value.trim();
+
+        if (!name) {
+          return;
+        }
+
+        result = name;
+
+        dialog.close();
+      });
+
+      $(".seller-dialog-cancel", dialog).addEventListener("click", () => {
+        dialog.close();
+      });
+
+      dialog.addEventListener("close", () => {
+        dialog.remove();
+
+        resolve(result);
+      });
+
+      dialog.showModal();
+
+      form.elements.namedItem("name").focus();
+    });
+  }
+
+  function refreshSellerViews() {
+    renderSellerNames();
+    renderSellers();
+    renderSellerProfiles();
+
+    fillSellerSelect("sale-seller", $("#sale-seller")?.value || "");
+  }
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("button");
+
+    if (!button) {
+      return;
+    }
+
+    // Cadastrar
+    if (
+      button.id === "new-seller-button" ||
+      button.hasAttribute("data-new-seller") ||
+      /cadastrar vendedora/i.test(button.textContent)
+    ) {
+      const name = await askSellerName();
 
       if (!name) {
         return;
       }
 
-      result = name;
+      try {
+        const seller = await insertSeller({ id: "", name: name.trim() });
 
-      dialog.close();
-    });
+        data.sellers.push(seller);
 
-    $(".seller-dialog-cancel", dialog).addEventListener("click", () => {
-      dialog.close();
-    });
+        refreshSellerViews();
 
-    dialog.addEventListener("close", () => {
-      dialog.remove();
+        toast("Vendedora cadastrada com sucesso!");
+      } catch (error) {
+        console.error(error);
 
-      resolve(result);
-    });
+        toast("Não foi possível cadastrar a vendedora.");
+      }
 
-    dialog.showModal();
-
-    form.elements.namedItem("name").focus();
-  });
-}
-
-function refreshSellerViews() {
-  renderSellerNames();
-  renderSellers();
-  renderSellerProfiles();
-
-  fillSellerSelect("sale-seller", $("#sale-seller")?.value || "");
-}
-
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("button");
-
-  if (!button) {
-    return;
-  }
-
-  // Cadastrar
-  if (
-    button.id === "new-seller-button" ||
-    button.hasAttribute("data-new-seller") ||
-    /cadastrar vendedora/i.test(button.textContent)
-  ) {
-    const name = await askSellerName();
-
-    if (!name) {
       return;
     }
 
-    try {
-      const seller = await insertSeller({ id: "", name: name.trim() });
+    // Desativar
+    const deactivate = button.closest("[data-deactivate-seller]");
 
-      data.sellers.push(seller);
-
-      refreshSellerViews();
-
-      toast("Vendedora cadastrada com sucesso!");
-    } catch (error) {
-      console.error(error);
-
-      toast("Não foi possível cadastrar a vendedora.");
-    }
-
-    return;
-  }
-
-  // Desativar
-  const deactivate = button.closest("[data-deactivate-seller]");
-
-  if (deactivate) {
-    const seller = data.sellers.find(
-      (item) => item.id === deactivate.dataset.deactivateSeller,
-    );
-
-    if (!seller) {
-      return;
-    }
-
-    try {
-      await deactivateSeller(seller.id);
-
-      seller.active = false;
-
-      refreshSellerViews();
-
-      toast("Vendedora desativada. O histórico foi preservado.");
-    } catch (error) {
-      console.error(error);
-
-      toast("Não foi possível desativar a vendedora.");
-    }
-
-    return;
-  }
-
-  // Reativar
-  const activate = button.closest("[data-activate-seller]");
-
-  if (activate) {
-    const seller = data.sellers.find(
-      (item) => item.id === activate.dataset.activateSeller,
-    );
-
-    if (!seller) {
-      return;
-    }
-
-    try {
-      await activateSeller(seller.id);
-
-      seller.active = true;
-
-      refreshSellerViews();
-
-      toast("Vendedora reativada.");
-    } catch (error) {
-      console.error(error);
-
-      toast("Não foi possível reativar a vendedora.");
-    }
-
-    return;
-  }
-
-  // Excluir (definitivo)
-  const remove = button.closest("[data-delete-seller]");
-
-  if (remove) {
-    const seller = data.sellers.find(
-      (item) => item.id === remove.dataset.deleteSeller,
-    );
-
-    if (!seller) {
-      return;
-    }
-
-    if (
-      !window.confirm(
-        `Excluir "${seller.name}" definitivamente? Esta ação não pode ser desfeita.`,
-      )
-    ) {
-      return;
-    }
-
-    try {
-      await deleteSeller(seller.id);
-
-      data.sellers = data.sellers.filter((item) => item.id !== seller.id);
-
-      data.clients.forEach((client) => {
-        if (client.sellerId === seller.id) {
-          client.sellerId = "";
-        }
-      });
-
-      refreshSellerViews();
-
-      toast("Vendedora excluída.");
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        error?.code === "23503"
-          ? "Esta vendedora tem vendas, clientes ou acertos vinculados. Use Desativar."
-          : "Não foi possível excluir a vendedora.",
+    if (deactivate) {
+      const seller = data.sellers.find(
+        (item) => item.id === deactivate.dataset.deactivateSeller,
       );
+
+      if (!seller) {
+        return;
+      }
+
+      try {
+        await deactivateSeller(seller.id);
+
+        seller.active = false;
+
+        refreshSellerViews();
+
+        toast("Vendedora desativada. O histórico foi preservado.");
+      } catch (error) {
+        console.error(error);
+
+        toast("Não foi possível desativar a vendedora.");
+      }
+
+      return;
     }
-  }
-});
+
+    // Reativar
+    const activate = button.closest("[data-activate-seller]");
+
+    if (activate) {
+      const seller = data.sellers.find(
+        (item) => item.id === activate.dataset.activateSeller,
+      );
+
+      if (!seller) {
+        return;
+      }
+
+      try {
+        await activateSeller(seller.id);
+
+        seller.active = true;
+
+        refreshSellerViews();
+
+        toast("Vendedora reativada.");
+      } catch (error) {
+        console.error(error);
+
+        toast("Não foi possível reativar a vendedora.");
+      }
+
+      return;
+    }
+
+    // Excluir (definitivo)
+    const remove = button.closest("[data-delete-seller]");
+
+    if (remove) {
+      const seller = data.sellers.find(
+        (item) => item.id === remove.dataset.deleteSeller,
+      );
+
+      if (!seller) {
+        return;
+      }
+
+      if (
+        !window.confirm(
+          `Excluir "${seller.name}"? As vendas, pagamentos, itens e acertos vinculados também serão apagados. Os clientes serão mantidos sem vendedora. Esta ação não pode ser desfeita.`,
+        )
+      ) {
+        return;
+      }
+
+      try {
+        await deleteSeller(seller.id);
+
+        data.sellers = data.sellers.filter((item) => item.id !== seller.id);
+
+        data.clients.forEach((client) => {
+          if (client.sellerId === seller.id) {
+            client.sellerId = "";
+          }
+        });
+
+        refreshSellerViews();
+
+        toast("Vendedora excluída.");
+      } catch (error) {
+        console.error(error);
+
+        if (error?.message) {
+          toast(error.message);
+          return;
+        }
+
+        toast(
+          error?.code === "SELLER_HAS_HISTORY"
+            ? error.message
+            : error?.code === "23503"
+            ? "Esta vendedora tem vendas, clientes ou acertos vinculados. Use Desativar."
+            : "Não foi possível excluir a vendedora.",
+        );
+      }
+    }
+  });
 
   document.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-rename-seller]");
@@ -3253,7 +3619,7 @@ document.addEventListener("click", async (event) => {
     } catch (error) {
       console.error(error);
 
-      toast("Não foi possível excluir a venda.");
+      toast(error.message || "Não foi possível excluir a venda.");
     }
   });
 
@@ -3495,6 +3861,16 @@ document.addEventListener("click", async (event) => {
     renderSellers();
 
     renderSellerProfiles();
+
+    let initialView = "inicio";
+    try {
+      const savedView = localStorage.getItem("trufas:last-view");
+      if ($(`#view-${savedView}`)) initialView = savedView;
+    } catch (error) {
+      console.warn("Não foi possível restaurar a seção anterior.", error);
+    }
+
+    setView(initialView);
   }
 
   // ============================================================

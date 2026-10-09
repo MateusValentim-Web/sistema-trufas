@@ -60,6 +60,11 @@
             Cadastrar venda
           </button>
 
+          <button class="nav-item" data-view="pendencias">
+            <span>＄</span>
+            Pendências
+          </button>
+
           <button class="nav-item" data-view="clientes">
             <span>♙</span>
             Clientes
@@ -424,13 +429,42 @@
 
                 <label>
                   Cliente
-
+                  <input
+                    id="sale-client-search"
+                    type="search"
+                    placeholder="Buscar por nome ou telefone"
+                  />
                   <select id="sale-client" required>
                     <option value="">Selecione um cliente</option>
                   </select>
                 </label>
 
+                <button
+                  type="button"
+                  class="button button-light"
+                  id="add-client-from-sale"
+                >
+                  + Adicionar novo cliente
+                </button>
+
                 <div class="form-divider"></div>
+
+                <button
+                  type="button"
+                  class="text-button"
+                  id="quick-client-button"
+                >
+                  ＋ Cadastrar novo cliente
+                </button>
+
+                <label>
+                  Status do pedido
+                  <select id="sale-order-status">
+                    <option value="pendente">Pendente</option>
+                    <option value="em_andamento">Em andamento</option>
+                    <option value="concluido">Concluído</option>
+                  </select>
+                </label>
 
                 <div class="line-title">
                   <div>
@@ -463,6 +497,31 @@
 
                   <strong id="sale-total"> R$ 0,00 </strong>
                 </div>
+
+                <h3>Pagamento recebido agora</h3>
+                <p class="form-intro">
+                  Opcional. O restante poderá ser recebido depois.
+                </p>
+                <label
+                  >Dinheiro recebido<input
+                    id="sale-cash-payment"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    inputmode="decimal"
+                    placeholder="0"
+                    value=""
+                /></label>
+                <label
+                  >Pix recebido<input
+                    id="sale-pix-payment"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    inputmode="decimal"
+                    placeholder="0"
+                    value=""
+                /></label>
 
                 <label class="notes-label">
                   Observações
@@ -544,6 +603,24 @@
             </div>
           </section>
 
+          <section class="view" id="view-pendencias">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">FINANCEIRO</p>
+                <h1>Pendências de <span>pagamento</span></h1>
+                <p class="subtitle">Vendas com saldo em aberto.</p>
+              </div>
+            </div>
+            <div class="panel list-panel">
+              <input
+                class="search-input"
+                id="pending-search"
+                placeholder="Buscar por nome ou telefone"
+              />
+              <div id="pending-list" class="table-list"></div>
+            </div>
+          </section>
+
           <!-- =========================================
              CLIENTES
         ========================================== -->
@@ -585,7 +662,9 @@
               <div id="client-list" class="table-list"></div>
             </div>
 
-            <dialog id="client-dialog" class="modal">
+          </section>
+
+          <dialog id="client-dialog" class="modal">
               <form method="dialog" id="client-form">
                 <div class="modal-head">
                   <div>
@@ -640,7 +719,6 @@
                 </div>
               </form>
             </dialog>
-          </section>
 
           <!-- =========================================
              SABORES
@@ -789,9 +867,14 @@
                 <div id="seller-items"></div>
 
                 <div class="seller-net">
-                  <span> Total vendido </span>
-
-                  <strong id="seller-net-total"> 0 trufas </strong>
+                  <div>
+                    <span>Total vendido</span>
+                    <strong id="seller-net-total">0 trufas</strong>
+                  </div>
+                  <div>
+                    <span>Total que voltou</span>
+                    <strong id="seller-returned-total">0 trufas</strong>
+                  </div>
                 </div>
 
                 <div class="form-actions">
@@ -877,6 +960,76 @@
               <div id="history-list" class="table-list"></div>
             </div>
           </section>
+
+          <dialog id="payment-dialog" class="modal">
+            <form id="payment-form">
+              <div class="modal-head">
+                <div>
+                  <p class="eyebrow">FINANCEIRO</p>
+                  <h2>Registrar pagamento</h2>
+                </div>
+
+                <button
+                  type="button"
+                  class="modal-close"
+                  id="payment-close"
+                  aria-label="Fechar"
+                >
+                  ×
+                </button>
+              </div>
+
+              <p class="form-intro">
+                Registre o valor recebido para abater o saldo desta venda.
+              </p>
+
+              <input type="hidden" id="payment-sale-id" />
+
+              <div class="payment-balance-card">
+                <span>Saldo pendente</span>
+                <strong id="payment-balance">R$ 0,00</strong>
+              </div>
+
+              <label>
+                Valor recebido (R$)
+                <input
+                  id="payment-amount"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  inputmode="decimal"
+                  required
+                  placeholder="Ex.: 25,00"
+                />
+              </label>
+
+              <label>
+                Forma de pagamento
+                <select id="payment-method" required>
+                  <option value="pix">Pix</option>
+                  <option value="dinheiro">Dinheiro</option>
+                </select>
+              </label>
+
+              <div class="form-actions">
+                <button
+                  type="button"
+                  class="button button-light"
+                  id="payment-cancel"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="submit"
+                  class="button button-primary"
+                  id="payment-submit"
+                >
+                  Registrar pagamento
+                </button>
+              </div>
+            </form>
+          </dialog>
 
           <!-- Toast -->
           <div id="toast" class="toast" role="status" aria-live="polite"></div>
