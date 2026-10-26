@@ -502,6 +502,42 @@
 
                 <div class="form-divider"></div>
 
+                <div class="line-title">
+                  <div>
+                    <h3>Tortiletes do pedido</h3>
+                    <small>R$ 2,00 por unidade.</small>
+                  </div>
+                </div>
+
+                <label>
+                  Quantidade de tortiletes
+                  <input
+                    id="tortilete-qty"
+                    type="number"
+                    min="0"
+                    max="999"
+                    step="1"
+                    value="0"
+                    inputmode="numeric"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  class="button button-light tortilete-promo-button"
+                  id="tortilete-promo"
+                  aria-pressed="false"
+                >
+                  Ativar promoção: 3 por R$ 5,00
+                </button>
+
+                <small class="tortilete-promo-hint">
+                  Com a promoção, cada grupo de 3 custa R$ 5,00; unidades
+                  restantes custam R$ 2,00 cada.
+                </small>
+
+                <div class="form-divider"></div>
+
                 <div class="sale-total">
                   <div>
                     <strong>Total do pedido</strong>
@@ -591,6 +627,22 @@
                     R$ 4,00
                     <small>/ un.</small>
                   </strong>
+                </div>
+
+                <h3 class="product-price-heading">Tortiletes</h3>
+                <p>
+                  Cada unidade custa R$ 2,00. Se ativar a promoção, cada grupo
+                  completo de 3 custa R$ 5,00.
+                </p>
+
+                <div class="price-detail">
+                  <span>Tortilete</span>
+                  <strong>R$ 2,00</strong>
+                </div>
+
+                <div class="price-detail">
+                  <span>Promoção (grupo de 3)</span>
+                  <strong>3 por R$ 5,00</strong>
                 </div>
 
                 <small class="price-hint">

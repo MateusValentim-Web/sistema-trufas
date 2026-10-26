@@ -981,6 +981,24 @@ h1 span {
   background: #fff;
 }
 
+.tortilete-promo-button {
+  width: 100%;
+  margin: 0 0 7px;
+}
+
+.tortilete-promo-button.is-active {
+  border-color: #8f604b;
+  background: #8f604b;
+  color: #fff;
+}
+
+.tortilete-promo-hint {
+  display: block;
+  color: #a3938b;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .remove-item {
   height: 30px;
   width: 26px;
@@ -1057,6 +1075,12 @@ h1 span {
     700 12px Manrope,
     sans-serif;
   margin: 11px 0 5px;
+}
+
+.price-panel .product-price-heading {
+  border-top: 1px solid #f1ebe7;
+  margin-top: 16px;
+  padding-top: 13px;
 }
 
 .price-panel > p {

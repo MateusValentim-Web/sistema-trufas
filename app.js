@@ -743,12 +743,6 @@
       throw error;
     }
 
-    const averagePrice =
-      sale.items.length > 0
-        ? sale.total /
-          sale.items.reduce((sum, item) => sum + Number(item.qty || 0), 0)
-        : 0;
-
     const itemRows = sale.items.map((item) => ({
       venda_id: insertedSale.id,
 
@@ -758,9 +752,9 @@
 
       quantidade: Number(item.qty),
 
-      preco_unitario: averagePrice,
+      preco_unitario: Number(item.unitPrice),
 
-      subtotal: averagePrice * Number(item.qty),
+      subtotal: Number(item.subtotal),
     }));
 
     if (itemRows.length) {
@@ -1114,6 +1108,14 @@
     }
 
     return quantity * 5;
+  }
+
+  function tortiletePriceFor(quantity, promotionActive) {
+    if (promotionActive) {
+      return Math.floor(quantity / 3) * 5 + (quantity % 3) * 2;
+    }
+
+    return quantity * 2;
   }
 
   // ============================================================
@@ -1859,34 +1861,77 @@
   }
 
   function getSaleTotal() {
-    let quantity = 0;
+    const quantity = $$(".sale-item")
+      .filter((row) => $(".flavor-select", row).value)
+      .reduce(
+        (total, row) =>
+          total + Math.max(0, Number($(".qty-input", row).value) || 0),
+        0,
+      );
+    const tortileteQuantity = Math.max(
+      0,
+      Number($("#tortilete-qty").value) || 0,
+    );
 
-    $$(".qty-input").forEach((input) => {
-      quantity += Math.max(0, Number(input.value) || 0);
+    $$(".sale-item").forEach((row) => {
+      $(".flavor-select", row).required = tortileteQuantity === 0;
     });
+
+    const tortiletePromotionActive =
+      $("#tortilete-promo").getAttribute("aria-pressed") === "true";
 
     return {
       qty: quantity,
-      total: priceFor(quantity),
+      tortileteQty: tortileteQuantity,
+      tortiletePromotionActive,
+      tortileteTotal: tortiletePriceFor(
+        tortileteQuantity,
+        tortiletePromotionActive,
+      ),
+      total:
+        priceFor(quantity) +
+        tortiletePriceFor(tortileteQuantity, tortiletePromotionActive),
     };
   }
 
   function updateTotal() {
-    const { qty, total } = getSaleTotal();
+    const { qty, tortileteQty, tortiletePromotionActive, tortileteTotal, total } =
+      getSaleTotal();
 
     $("#sale-total").textContent = money(total);
 
-    let breakdown = "Selecione as trufas para calcular.";
+    const breakdownParts = [];
 
     if (qty === 1) {
-      breakdown = "1 × R$ 5,00";
+      breakdownParts.push("1 × R$ 5,00");
     } else if (qty === 2) {
-      breakdown = data.promos.two ? "Combo de 2: R$ 9,00" : "2 × R$ 5,00";
+      breakdownParts.push(
+        data.promos.two ? "Combo de 2: R$ 9,00" : "2 × R$ 5,00",
+      );
     } else if (qty >= 3) {
-      breakdown = data.promos.three ? `${qty} × R$ 4,00` : `${qty} × R$ 5,00`;
+      breakdownParts.push(
+        data.promos.three
+          ? `${qty} × R$ 4,00`
+          : `${qty} × R$ 5,00`,
+      );
     }
 
-    $("#price-explanation").textContent = breakdown;
+    if (tortileteQty > 0) {
+      const tortileteBreakdown =
+        tortiletePromotionActive && tortileteQty >= 3
+          ? `Tortiletes: ${Math.floor(tortileteQty / 3)} grupo(s) de 3 por R$ 5,00${
+              tortileteQty % 3
+                ? ` + ${tortileteQty % 3} × R$ 2,00`
+                : ""
+            }`
+          : `Tortiletes: ${tortileteQty} × R$ 2,00`;
+
+      breakdownParts.push(`${tortileteBreakdown} = ${money(tortileteTotal)}`);
+    }
+
+    $("#price-explanation").textContent =
+      breakdownParts.join(" · ") ||
+      "Selecione as trufas para calcular.";
   }
 
   // ============================================================
@@ -2441,7 +2486,9 @@
           (sum, sale) =>
             sum +
             sale.items.reduce(
-              (total, item) => total + Number(item.qty || 0),
+              (total, item) =>
+                total +
+                (item.flavorId ? Number(item.qty || 0) : 0),
               0,
             ),
           0,
@@ -2686,6 +2733,18 @@
       addSaleItem();
     }
 
+    if (event.target.closest("#tortilete-promo")) {
+      const button = $("#tortilete-promo");
+      const isActive = button.getAttribute("aria-pressed") === "true";
+
+      button.setAttribute("aria-pressed", String(!isActive));
+      button.classList.toggle("is-active", !isActive);
+      button.textContent = isActive
+        ? "Ativar promoção: 3 por R$ 5,00"
+        : "Promoção ativada: 3 por R$ 5,00 (clique para desativar)";
+      updateTotal();
+    }
+
     if (event.target.closest(".remove-item")) {
       event.target.closest(".sale-item").remove();
 
@@ -2774,7 +2833,7 @@
   // ============================================================
 
   document.addEventListener("input", (event) => {
-    if (event.target.matches(".qty-input")) {
+    if (event.target.matches(".qty-input,#tortilete-qty")) {
       updateTotal();
     }
 
@@ -3043,17 +3102,46 @@
       return;
     }
 
-    if (!items.length || items.reduce((sum, item) => sum + item.qty, 0) < 1) {
-      toast("Adicione ao menos uma trufa ao pedido.");
+    const truffleQuantity = items.reduce((sum, item) => sum + item.qty, 0);
+    const tortileteQuantity = Math.max(
+      0,
+      Number($("#tortilete-qty").value) || 0,
+    );
+
+    if (truffleQuantity < 1 && tortileteQuantity < 1) {
+      toast("Adicione ao menos uma trufa ou um tortilete ao pedido.");
 
       return;
+    }
+
+    const truffleTotal = priceFor(truffleQuantity);
+    const truffleUnitPrice = truffleQuantity
+      ? truffleTotal / truffleQuantity
+      : 0;
+    items.forEach((item) => {
+      item.unitPrice = truffleUnitPrice;
+      item.subtotal = truffleUnitPrice * item.qty;
+    });
+
+    const tortiletePromotionActive =
+      $("#tortilete-promo").getAttribute("aria-pressed") === "true";
+    const tortileteTotal = tortiletePriceFor(
+      tortileteQuantity,
+      tortiletePromotionActive,
+    );
+    if (tortileteQuantity > 0) {
+      items.push({
+        flavorId: "",
+        flavorName: "Tortilete",
+        qty: tortileteQuantity,
+        unitPrice: tortileteTotal / tortileteQuantity,
+        subtotal: tortileteTotal,
+      });
     }
 
     const seller = data.sellers.find(
       (item) => item.id === $("#sale-seller").value,
     );
-
-    const quantity = items.reduce((sum, item) => sum + item.qty, 0);
 
     const sale = {
       id: "",
@@ -3068,7 +3156,7 @@
 
       items,
 
-      total: priceFor(quantity),
+      total: truffleTotal + tortileteTotal,
 
       orderStatus: $("#sale-order-status").value,
 
@@ -3111,6 +3199,10 @@
       $("#sale-order-status").value = "pendente";
       $("#sale-cash-payment").value = "";
       $("#sale-pix-payment").value = "";
+      $("#tortilete-qty").value = "0";
+      $("#tortilete-promo").setAttribute("aria-pressed", "false");
+      $("#tortilete-promo").classList.remove("is-active");
+      $("#tortilete-promo").textContent = "Ativar promoção: 3 por R$ 5,00";
 
       $("#sale-items").innerHTML = "";
 
